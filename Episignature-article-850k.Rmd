@@ -1,0 +1,136 @@
+---
+title: "Episignature-Blood-850k"
+output: html_document
+date: '2022-10-06'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Please modify path to directory containing myLoad, myNorm and the disease myDMP
+path<-"/run/media/ganneb/Benny-USBC/Documents/Médecine/Master 2/Stage/Méthylation/Episignature/"
+knitr::opts_knit$set(root.dir = path)
+```
+
+```{r libraries,echo=F}
+library(stringr)
+library(caret)
+library(pheatmap)
+library(rmarkdown)
+```
+
+## R Markdown
+
+```{r prerequisite, echo=F}
+getwd()
+#Load myLoad, myNorm, and the disease myDMP
+load("./myLoad.rda")
+load("./myNorm.rda")
+load("./myDMP-FSHD2.rda")
+```
+
+```{r episignature, echo=F, warning=F}
+#Selection of DMP shared by all training and testing dataframes
+j<-myDMP[[1]]
+j<-j[which(abs(j$deltaBeta)>=0.05),]
+
+# 850k
+testing_ncbrs<-read.csv(file = "/run/media/ganneb/Benny-USBC/Documents/Médecine/Master 2/Stage/Méthylation/Data-GEO/Done/850k/GSE125367_series_matrix_ncbrs_controls.txt",row.names=1,header = T)
+testing_ncbrs<-testing_ncbrs[complete.cases(testing_ncbrs),]
+testing_ncbrs<-data.frame(t(testing_ncbrs[which(rownames(testing_ncbrs) %in% rownames(j)),]))
+
+testing_fshd1<-read.csv(file = "./FSHD1-BLOOD.csv",row.names = 1,header = T)
+testing_fshd1<-testing_fshd1[complete.cases(testing_fshd1),]
+testing_fshd1<-data.frame(t(testing_fshd1[which(rownames(testing_fshd1) %in% rownames(j)),]))
+
+testing_fshd2<-read.csv(file = "./FSHD2-BLOOD-2.csv",row.names = 1,header = T)
+testing_fshd2<-testing_fshd2[complete.cases(testing_fshd2),]
+testing_fshd2<-data.frame(t(testing_fshd2[which(rownames(testing_fshd2) %in% rownames(j)),]))
+
+DMPlist<-Reduce(intersect,list(colnames(testing_ncbrs),colnames(testing_fshd1),colnames(testing_fshd2)))
+
+testing_ncbrs<-testing_ncbrs[,which(colnames(testing_ncbrs) %in% DMPlist)]
+testing_ncbrs["Status"]<-0
+testing_fshd1<-testing_fshd1[,which(colnames(testing_fshd1) %in% DMPlist)]
+testing_fshd1["Status"]<-0
+testing_fshd2<-testing_fshd2[,which(colnames(testing_fshd2) %in% DMPlist)]
+testing_fshd2["Status"]<-1
+
+j<-j[which(rownames(j) %in% DMPlist),]
+DMPscore<-data.frame()
+for(i in rownames(j)){
+  DMPscore[i,"Score"]<-((abs(j[i,1])*(-log(j[i,4]))))
+}
+DMPscore<-DMPscore[order(-DMPscore$Score),,drop = FALSE]
+
+ctlist=list()
+#Put common string between all controls
+ct<- "CT"
+#Put Sample_Name of controls
+ct1<- "CTM"
+ct2<- "CTF"
+
+for(i in myLoad$pd$Sample_Name){
+  if(str_detect(i,ct)){
+    i<-gsub("\\d$","",i)
+    ctlist<-append(ctlist,i)}}
+ctlist<-unique(ctlist)
+phenolist<-list(myLoad$pd$Sample_Group[myLoad$pd$Sample_Pheno == "FSHD2"])
+
+# Testing variable number of probes
+for(k in seq(0,20,by=5)){
+  percent<-50+k
+  probes<-list()
+  for(i in 1:percent){
+    probes<-append(probes,rownames(DMPscore)[i])
+  }
+  
+  #Probes selection and heatmap
+  x<-myNorm[which(rownames(myNorm) %in% probes),]
+
+  #Create database for SVM
+  ct<-"CT"
+  y<-data.frame(t(x))
+  y["Status"]<-NA
+  for(i in 1:length(rownames(y))){
+    if(str_detect(rownames(y[i,]),ct)){
+      y$Status[i]<-0
+    }
+    else{
+      y$Status[i]<-1
+    }
+  }
+  
+  #SVM training and pre-testing
+  testing_base<-testing_ncbrs[,which(colnames(testing_ncbrs) %in% probes)]
+  testing_base["Status"]<-0
+  big_850k<-rbind(testing_base,y)
+  big_850k<-big_850k[complete.cases(big_850k),]
+  big_850k$Status = factor(big_850k$Status)
+  intrain<-createDataPartition(big_850k$Status,p=0.7,list=FALSE)
+  training<-big_850k[intrain,]
+  testing<-big_850k[-intrain,]
+  trctrl<-trainControl(method = "cv",number = 10)
+  svm_linear<-train(Status ~.,data = training,method = "svmLinearWeights2",
+                    trControl = trctrl,preProcess=c("center","scale","nzv"))
+  test_pred<-predict(svm_linear,newdata = testing)
+  print(paste("Number of tested probes : ", percent))
+  print("Original status :")
+  print(testing$Status)
+  print("Predicted status :")
+  print(test_pred)
+
+  #Patient Test
+  test_pred<-predict(svm_linear,newdata = testing_fshd1)
+  print("Original FSHD1 status :")
+  print(testing_fshd1$Status)
+  print("Predicted FSHD1 status :")
+  print(test_pred)
+  test_pred<-predict(svm_linear,newdata = testing_fshd2)
+  print("Original FSHD2 status :")
+  print(testing_fshd2$Status)
+  print("Predicted FSHD2 status :")
+  print(test_pred)
+  p<-pheatmap(x,scale = "row",clustering_distance_cols = "manhattan",clustering_distance_rows = "manhattan",fontsize = 8,
+      fontsize_row = 2,treeheight_row = 0,cellwidth = 10,cellheight = 1,angle_col = 90,clustering_method = "ward.D2")
+  }
+```
